@@ -1,0 +1,88 @@
+import openai
+from datasets import load_dataset
+from rouge_score import rouge_scorer
+import textwrap
+from sacrebleu import corpus_bleu
+
+# Step 1: Load examples from the arXiv dataset
+dataset = load_dataset("scientific_papers", "arxiv", split='test[:20]')
+
+# Set up OpenAI API key
+openai.api_key = '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'
+
+# Define helper functions
+def chunk_text(text, max_length):
+    # Uses textwrap to split the text into chunks with max_length
+    return textwrap.wrap(text, max_length, break_long_words=False, replace_whitespace=False)
+
+
+def summarize_text(text, angle, max_tokens):
+    # Summarize each chunk of text with a given angle
+    chunked_text = chunk_text(text, 1024)  # Maximum context size
+    summaries = [" ".join(chunked_text)]  # Start with the original text
+    # Keep summarizing until the summary is shorter than max_tokens
+    while True:
+        current_summary = summaries[-1]
+        if len(current_summary) <= max_tokens:
+            break  # Stop if the current summary is short enough
+        new_summary_chunks = chunk_text(current_summary, 1024)
+        new_summary = " ".join([
+            openai.Completion.create(
+                model="text-davinci-002",
+                prompt=f"Extract the most relevant sentences with emphasis on {angle}:\n\n{chunk}",
+                max_tokens=120
+            )['choices'][0]['text'].strip() for chunk in new_summary_chunks
+        ])
+        summaries.append(new_summary)
+    return summaries[-1]
+
+def generate_final_summary(text, angle):
+    # Generate the final summary using GPT-3.5
+    response = openai.Completion.create(
+        model="text-davinci-003",
+        prompt=f"Provide a summary of the following text with emphasis on {angle}:\n\n{text}",
+        max_tokens=300  # Adjustable based on the use case
+    )
+    return response['choices'][0]['text'].strip()
+
+# Step 2: Summarize each paper with an angle and evaluate using ROUGE and BLEU scores
+scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+rouge_scores = []
+bleu_scores = []
+
+
+for paper in dataset:
+    input_text = paper['article']
+    angle = "the approach and method"  # Example angle
+    intermediate_summary = summarize_text(input_text, angle, 4000) #max token for gpt3.5
+    final_summary = generate_final_summary(intermediate_summary, angle)
+    paper['summary_with_angle'] = final_summary
+    scores = scorer.score(paper['abstract'], final_summary)
+    rouge_scores.append(scores)
+    
+    
+    # BLEU score
+    bleu_score = corpus_bleu([final_summary], [[paper['abstract']]]).score
+    bleu_scores.append(bleu_score)
+
+
+
+    # Print summaries and abstracts
+    print(f"Abstract:\n{textwrap.fill(paper['abstract'], width=80)}\n")
+    print(f"Generated Summary:\n{textwrap.fill(final_summary, width=80)}\n")
+    print('-' * 80)
+    
+      
+
+# Step 3: Calculate the average ROUGE score
+average_rouge = {
+    'rouge1': sum(score['rouge1'].fmeasure for score in rouge_scores) / len(rouge_scores),
+    'rouge2': sum(score['rouge2'].fmeasure for score in rouge_scores) / len(rouge_scores),
+    'rougeL': sum(score['rougeL'].fmeasure for score in rouge_scores) / len(rouge_scores)
+}
+
+print("Average ROUGE scores:", average_rouge)
+
+average_bleu = sum(bleu_scores) / len(bleu_scores)
+
+print("Average BLEU score:", average_bleu)
